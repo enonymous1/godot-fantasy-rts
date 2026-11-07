@@ -14,7 +14,7 @@ var damage: int = 3
 var attack_range: float = 20.0
 var attack_cooldown: float = 1.0
 var sight: float = 200.0
-var state: String = "idle" # idle/move/gather_to/gathering/return/ chop/chopping/build/building/attack/attack_move
+var state: String = "idle" # idle / move / attack_move / gather_to / gathering / return / build / building / attack
 var target_pos: Vector2 = Vector2.ZERO
 var target_unit: RTSUnit = null
 var target_building: RTSBuilding = null
@@ -27,11 +27,17 @@ var selected: bool = false
 var dead: bool = false
 
 
-func setup(p_faction: String, p_kind: String, pos: Vector2) -> void:
+# Returns false for an unknown kind instead of silently building a
+# default-stat unit: the caller (main.gd) rejects the spawn and logs
+# it, so a bad kind is a loud error, not a mystery unit on the map.
+func setup(p_faction: String, p_kind: String, pos: Vector2) -> bool:
+	var st := RTSData.unit_stats(p_kind)
+	if st.is_empty():
+		push_error("RTSUnit.setup: unknown unit kind '%s'" % p_kind)
+		return false
 	faction = p_faction
 	kind = p_kind
 	position = pos
-	var st := RTSData.unit_stats(kind)
 	max_hp = int(st.get("hp", 30))
 	hp = max_hp
 	speed = float(st.get("speed", 90.0))
@@ -39,6 +45,7 @@ func setup(p_faction: String, p_kind: String, pos: Vector2) -> void:
 	attack_range = float(st.get("range", 20.0))
 	attack_cooldown = float(st.get("cooldown", 1.0))
 	sight = float(st.get("sight", 200.0))
+	return true
 
 
 func faction_color() -> Color:
@@ -62,8 +69,18 @@ func body_color() -> Color:
 	return Color(0.8, 0.8, 0.8)
 
 
+# Drawing is in local space, so moving does not need a redraw.
+# Only appearance changes do: HP, selection, and the carry dot.
+# Redrawing every frame rebuilt the same canvas item 60 times a
+# second for every unit on the map.
+var _draw_key := ""
+
+
 func _process(_delta: float) -> void:
-	queue_redraw()
+	var key := "%d|%s|%s|%d" % [hp, str(selected), carry_type, carry_amount]
+	if key != _draw_key:
+		_draw_key = key
+		queue_redraw()
 
 
 func _draw() -> void:

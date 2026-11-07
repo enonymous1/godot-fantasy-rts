@@ -8,14 +8,23 @@ var amount: int = 1500
 var dead: bool = false
 
 
-func setup(p_kind: String, pos: Vector2, p_amount: int) -> void:
+# Returns false for an unknown kind or a negative amount.
+func setup(p_kind: String, pos: Vector2, p_amount: int) -> bool:
+	if p_kind != "gold" and p_kind != "tree":
+		push_error("RTSResource.setup: unknown resource kind '%s'" % p_kind)
+		return false
+	if p_amount < 0:
+		push_error("RTSResource.setup: negative amount %d" % p_amount)
+		return false
 	kind = p_kind
 	amount = p_amount
 	position = pos
+	return true
 
 
-func _process(_delta: float) -> void:
-	queue_redraw()
+# No _process: a resource's appearance never changes (the amount is
+# not drawn), so it is painted once when it enters the tree. The old
+# per-frame queue_redraw rebuilt ~50 static canvas items 60x/sec.
 
 
 func _draw() -> void:

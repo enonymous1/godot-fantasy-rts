@@ -12,8 +12,10 @@ func _ready() -> void:
 	z_index = 50
 
 
-func _process(_delta: float) -> void:
-	queue_redraw()
+# No _process: the fog only changes when the game recomputes it
+# (4 Hz) or the player toggles it, and main.gd queues a redraw at
+# those moments. The old per-frame redraw repainted up to ~1,650
+# rects 60 times a second for a grid that had not changed.
 
 
 func _draw() -> void:

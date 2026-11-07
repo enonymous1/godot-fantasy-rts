@@ -1,10 +1,17 @@
-## Fantasy RTS — Godot (v0.2.0).
+## Fantasy RTS — Godot (v0.3.0).
 ## A playable 2D RTS in the style of classic 1990s
 ## real-time strategy games: gold + lumber economy,
 ## worker gather-and-return, farms for supply, barracks
 ## troops, and an Orc AI that builds up and attacks in waves.
 ## All art is original procedural shapes and all sound is
 ## synthesized; no third-party assets are used.
+##
+## Architecture: this file is the game controller and
+## composition root — map, economy, simulation, AI, fog,
+## camera, input, and multiplayer. All UI lives in
+## scripts/hud.gd (RTSHud); all tuning lives in
+## scripts/rts_data.gd (RTSData). See REVIEW.md for the
+## staff-review pass that split the HUD out (v0.3.0).
 ##
 ## Modes (pick one on the start menu):
 ##   Single Battle — you are the Humans, the Orcs are AI.
@@ -28,6 +35,14 @@ extends Node2D
 const PLAYER_FACTION := "human"
 const AI_FACTION := "orc"
 const MP_PORT := 7777
+
+# Camera / UI constants (game tuning lives in RTSData).
+const CAMERA_SPEED := 550.0
+const CAMERA_ZOOM_MIN := 0.5
+const CAMERA_ZOOM_MAX := 1.5
+const EDGE_MARGIN := 12.0
+const TOP_BAR_HEIGHT := 36.0
+const BOTTOM_PANEL_HEIGHT := 110.0
 
 var camera: Camera2D
 var units: Array[RTSUnit] = []
@@ -62,7 +77,6 @@ var fog_layer: RTSFogLayer = null
 # Sound + minimap.
 var sound: RTSSoundManager = null
 var minimap: RTSMinimap = null
-var sound_button: Button = null
 
 # Campaign.
 var mission: Dictionary = {}
@@ -87,26 +101,10 @@ var ai_timer: float = 0.0
 var ai_attack_timer: float = 75.0
 var ai_stage: int = 0
 
-# UI
-var ui: CanvasLayer
-var gold_label: Label
-var wood_label: Label
-var supply_label: Label
-var time_label: Label
-var message_label: Label
-var selection_label: Label
-var command_box: HBoxContainer
-var selection_rect: ColorRect
-var end_panel: PanelContainer
-var end_label: Label
-var next_mission_button: Button = null
-# Start menu.
-var menu_panel: PanelContainer
-var mission_list: VBoxContainer
-var briefing_label: Label
-var mission_start_button: Button
-var selected_mission: int = -1
-var ip_edit: LineEdit
+# UI lives in scripts/hud.gd (RTSHud). This node only calls
+# into it (hud.set_message / hud.refresh_command_panel /
+# hud.update_hud / hud.show_end) and keeps game flow here.
+var hud: RTSHud = null
 
 
 func _ready() -> void:
@@ -114,11 +112,10 @@ func _ready() -> void:
 	_build_camera()
 	_build_map()
 	_init_fog()
-	_build_ui()
+	_build_hud()
 	_build_fog_layer()
 	_build_minimap()
 	_build_sound()
-	_build_menu()
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	_set_message("Pick a mode on the menu to start.")
@@ -161,6 +158,12 @@ func _build_fog_layer() -> void:
 	add_child(fog_layer)
 
 
+func _build_hud() -> void:
+	hud = RTSHud.new()
+	hud.game = self
+	add_child(hud)
+
+
 func _build_minimap() -> void:
 	minimap = RTSMinimap.new()
 	minimap.game = self
@@ -169,95 +172,26 @@ func _build_minimap() -> void:
 	minimap.offset_top = -245
 	minimap.offset_right = -12
 	minimap.offset_bottom = -112
-	ui.add_child(minimap)
+	hud.add_child(minimap)
+
+
+# Thin wrappers so the rest of the controller keeps calling
+# _set_message / _refresh_command_panel without knowing the HUD
+# owns the labels and buttons.
+func _set_message(text: String) -> void:
+	if hud:
+		hud.set_message(text)
+
+
+func _refresh_command_panel() -> void:
+	if hud:
+		hud.refresh_command_panel()
 
 
 func _build_sound() -> void:
 	sound = RTSSoundManager.new()
 	sound.name = "Sound"
 	add_child(sound)
-
-
-func _build_menu() -> void:
-	menu_panel = PanelContainer.new()
-	menu_panel.set_anchors_preset(Control.PRESET_CENTER)
-	ui.add_child(menu_panel)
-	var vbox := VBoxContainer.new()
-	menu_panel.add_child(vbox)
-	var title := Label.new()
-	title.text = "Fantasy RTS"
-	title.add_theme_font_size_override("font_size", 30)
-	vbox.add_child(title)
-	var sub := Label.new()
-	sub.text = "Humans vs Orcs — Godot RTS  •  Left: select  •  Right: move / attack / gather"
-	vbox.add_child(sub)
-	var single := Button.new()
-	single.text = "Single Battle (vs Orc AI)"
-	single.pressed.connect(_start_single)
-	vbox.add_child(single)
-	var camp_toggle := Button.new()
-	camp_toggle.text = "Campaign…"
-	camp_toggle.pressed.connect(func() -> void: mission_list.visible = not mission_list.visible)
-	vbox.add_child(camp_toggle)
-	mission_list = VBoxContainer.new()
-	mission_list.visible = false
-	vbox.add_child(mission_list)
-	for i in RTSCampaign.missions().size():
-		var m: Dictionary = RTSCampaign.mission(i)
-		var b := Button.new()
-		var locked := i >= campaign_unlocked
-		b.text = String(m.get("name", "?")) + ("  (locked)" if locked else "")
-		b.disabled = locked
-		b.pressed.connect(_on_mission_picked.bind(i))
-		mission_list.add_child(b)
-	briefing_label = Label.new()
-	briefing_label.text = "Pick a mission to see its briefing."
-	briefing_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	briefing_label.custom_minimum_size = Vector2(420, 60)
-	mission_list.add_child(briefing_label)
-	mission_start_button = Button.new()
-	mission_start_button.text = "Start mission"
-	mission_start_button.disabled = true
-	mission_start_button.pressed.connect(_on_mission_start_pressed)
-	mission_list.add_child(mission_start_button)
-	var host := Button.new()
-	host.text = "Host Game (LAN, you are Humans)"
-	host.pressed.connect(_start_host)
-	vbox.add_child(host)
-	var join_row := HBoxContainer.new()
-	vbox.add_child(join_row)
-	ip_edit = LineEdit.new()
-	ip_edit.text = "127.0.0.1"
-	ip_edit.custom_minimum_size = Vector2(160, 0)
-	ip_edit.placeholder_text = "Host IP"
-	join_row.add_child(ip_edit)
-	var join := Button.new()
-	join.text = "Join Game (you are Orcs)"
-	join.pressed.connect(_on_join_pressed)
-	join_row.add_child(join)
-	var ws_check := CheckButton.new()
-	ws_check.text = "WebSocket (TCP) transport instead of ENet (UDP)"
-	ws_check.toggled.connect(func(on: bool) -> void: use_websocket = on)
-	vbox.add_child(ws_check)
-	var note := Label.new()
-	note.text = "Multiplayer: 2 players on the same network, port 7777. Host simulates; joiner sends orders. Use WebSocket if UDP is blocked on your network."
-	note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	note.custom_minimum_size = Vector2(420, 40)
-	vbox.add_child(note)
-
-
-func _on_mission_picked(index: int) -> void:
-	selected_mission = index
-	var m := RTSCampaign.mission(index)
-	briefing_label.text = String(m.get("briefing", ""))
-	mission_start_button.disabled = false
-	if sound:
-		sound.play("click")
-
-
-func _on_mission_start_pressed() -> void:
-	if selected_mission >= 0:
-		_start_campaign(selected_mission)
 
 
 func _on_next_mission_pressed() -> void:
@@ -269,18 +203,9 @@ func _on_next_mission_pressed() -> void:
 	get_tree().reload_current_scene()
 
 
-func _on_sound_button_pressed() -> void:
-	if sound:
-		var muted := sound.toggle_mute()
-		sound_button.text = "Sound: Off" if muted else "Sound: On"
-
-
-func _on_join_pressed() -> void:
-	_start_join(ip_edit.text.strip_edges())
-
-
 func _hide_menu() -> void:
-	menu_panel.visible = false
+	if hud:
+		hud.hide_menu()
 	started = true
 	_recompute_fog()
 	_set_message("Order a Peasant to the Gold Mine (right-click it), and another to chop wood. Build a Barracks to train Footmen.")
@@ -313,6 +238,9 @@ func _start_campaign(index: int) -> void:
 		_spawn_building("orc", "barracks", Vector2(1900, 500))
 		for i in int(mission.get("orc_extra_grunts", 0)):
 			_spawn_unit("orc", "grunt", Vector2(1950 + i * 50, 620))
+	# Stage 2 skips the AI's build stages (farm, then barracks):
+	# mission 3 starts the Orcs entrenched, so they go straight
+	# to training and attacking.
 	ai_stage = 2
 	_hide_menu()
 	_set_message(String(mission.get("briefing", "")))
@@ -437,10 +365,17 @@ func _next_entity_id(p_id: int = -1) -> int:
 	return id
 
 
+# Spawn helpers. They return null (and push_error) for an unknown
+# kind instead of silently creating a default-stat entity — a bad
+# kind is a loud error at the call site, not a mystery unit on the
+# map. Callers must null-check the result.
 func _spawn_unit(faction: String, kind: String, pos: Vector2, p_id: int = -1) -> RTSUnit:
 	var u := RTSUnit.new()
+	if not u.setup(faction, kind, pos):
+		push_error("main._spawn_unit: refusing unknown unit kind '%s'" % kind)
+		u.free()
+		return null
 	u.id = _next_entity_id(p_id)
-	u.setup(faction, kind, pos)
 	add_child(u)
 	units.append(u)
 	return u
@@ -448,8 +383,11 @@ func _spawn_unit(faction: String, kind: String, pos: Vector2, p_id: int = -1) ->
 
 func _spawn_building(faction: String, kind: String, pos: Vector2, under_construction: bool = false, p_id: int = -1) -> RTSBuilding:
 	var b := RTSBuilding.new()
+	if not b.setup(faction, kind, pos, under_construction):
+		push_error("main._spawn_building: refusing unknown building kind '%s'" % kind)
+		b.free()
+		return null
 	b.id = _next_entity_id(p_id)
-	b.setup(faction, kind, pos, under_construction)
 	add_child(b)
 	buildings.append(b)
 	return b
@@ -457,8 +395,11 @@ func _spawn_building(faction: String, kind: String, pos: Vector2, under_construc
 
 func _spawn_resource(kind: String, pos: Vector2, amount: int, p_id: int = -1) -> RTSResource:
 	var r := RTSResource.new()
+	if not r.setup(kind, pos, amount):
+		push_error("main._spawn_resource: refusing resource kind '%s' amount %d" % [kind, amount])
+		r.free()
+		return null
 	r.id = _next_entity_id(p_id)
-	r.setup(kind, pos, amount)
 	add_child(r)
 	resource_nodes.append(r)
 	return r
@@ -486,141 +427,11 @@ func _resource_by_id(id: int) -> RTSResource:
 
 
 # ---------------------------------------------------------------- UI
-
-func _build_ui() -> void:
-	ui = CanvasLayer.new()
-	ui.name = "UI"
-	add_child(ui)
-
-	var top := ColorRect.new()
-	top.color = Color(0.08, 0.08, 0.12, 0.9)
-	top.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	top.offset_bottom = 36
-	ui.add_child(top)
-
-	gold_label = _make_label(Vector2(12, 8), "Gold: 400")
-	wood_label = _make_label(Vector2(160, 8), "Wood: 200")
-	supply_label = _make_label(Vector2(300, 8), "Supply: 3/9")
-	time_label = _make_label(Vector2(460, 8), "0:00")
-	var help := _make_label(Vector2(620, 8), "Left: select  |  Right: move / attack / gather  |  WASD: pan  |  Wheel: zoom")
-	help.add_theme_color_override("font_color", Color(0.75, 0.75, 0.75))
-
-	message_label = _make_label(Vector2(12, 44), "")
-	message_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.4))
-
-	var bottom := ColorRect.new()
-	bottom.color = Color(0.08, 0.08, 0.12, 0.9)
-	bottom.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
-	bottom.offset_top = -110
-	ui.add_child(bottom)
-
-	selection_label = _make_label(Vector2(12, 618), "Nothing selected")
-	command_box = HBoxContainer.new()
-	command_box.position = Vector2(12, 648)
-	command_box.add_theme_constant_override("separation", 8)
-	ui.add_child(command_box)
-
-	selection_rect = ColorRect.new()
-	selection_rect.color = Color(0.2, 0.9, 0.2, 0.15)
-	selection_rect.visible = false
-	ui.add_child(selection_rect)
-
-	end_panel = PanelContainer.new()
-	end_panel.set_anchors_preset(Control.PRESET_CENTER)
-	end_panel.visible = false
-	ui.add_child(end_panel)
-	var vbox := VBoxContainer.new()
-	end_panel.add_child(vbox)
-	end_label = Label.new()
-	end_label.add_theme_font_size_override("font_size", 28)
-	vbox.add_child(end_label)
-	var restart := Button.new()
-	restart.text = "Play again"
-	restart.pressed.connect(_on_restart_pressed)
-	vbox.add_child(restart)
-	next_mission_button = Button.new()
-	next_mission_button.text = "Next mission"
-	next_mission_button.visible = false
-	next_mission_button.pressed.connect(_on_next_mission_pressed)
-	vbox.add_child(next_mission_button)
-	sound_button = Button.new()
-	sound_button.text = "Sound: On"
-	sound_button.position = Vector2(1080, 4)
-	sound_button.pressed.connect(_on_sound_button_pressed)
-	ui.add_child(sound_button)
-
-
-func _make_label(pos: Vector2, text: String) -> Label:
-	var l := Label.new()
-	l.position = pos
-	l.text = text
-	l.add_theme_font_size_override("font_size", 16)
-	ui.add_child(l)
-	return l
-
-
-func _set_message(text: String) -> void:
-	if message_label:
-		message_label.text = text
-
-
-func _refresh_command_panel() -> void:
-	for c in command_box.get_children():
-		c.queue_free()
-	if selected_building != null and selected_building.faction == PLAYER_FACTION and not selected_building.under_construction:
-		if selected_building.kind == "town_hall":
-			_add_command("Train Peasant (50g)", "train_peasant")
-		elif selected_building.kind == "barracks":
-			_add_command("Train Footman (60g 20w)", "train_footman")
-			_add_command("Train Archer (50g 30w)", "train_archer")
-		selection_label.text = "%s — HP %d/%d  (queue: %d)" % [
-			String(RTSData.building_stats(selected_building.kind).get("name", "?")),
-			selected_building.hp, selected_building.max_hp, selected_building.queue.size()]
-		return
-	if selected_units.is_empty():
-		selection_label.text = "Nothing selected"
-		return
-	var worker_count := 0
-	for u in selected_units:
-		if RTSData.is_worker(u.kind):
-			worker_count += 1
-	selection_label.text = "%d unit(s) selected" % selected_units.size()
-	if worker_count > 0:
-		_add_command("Build Farm (100g 50w)", "build_farm")
-		_add_command("Build Barracks (150g 100w)", "build_barracks")
-	_add_command("Stop", "stop")
-
-
-func _add_command(text: String, action: String) -> void:
-	var b := Button.new()
-	b.text = text
-	b.pressed.connect(_on_command_pressed.bind(action))
-	command_box.add_child(b)
-
-
-func _on_command_pressed(action: String) -> void:
-	if game_over:
-		return
-	match action:
-		"train_peasant":
-			_train_unit("peasant")
-		"train_footman":
-			_train_unit("footman")
-		"train_archer":
-			_train_unit("archer")
-		"build_farm":
-			placing_kind = "farm"
-			_set_message("Placing Farm — left-click to place, right-click to cancel.")
-		"build_barracks":
-			placing_kind = "barracks"
-			_set_message("Placing Barracks — left-click to place, right-click to cancel.")
-		"stop":
-			for u in selected_units:
-				u.state = "idle"
-				u.target_unit = null
-				u.target_building = null
-				u.target_resource = null
-
+# The UI lives in scripts/hud.gd (RTSHud): top bar, message line,
+# bottom command panel, selection rectangle, end panel, and the
+# start menu. This file only keeps game flow (restart / next
+# mission) and the thin _set_message / _refresh_command_panel
+# wrappers near _build_hud above.
 
 func _on_restart_pressed() -> void:
 	get_tree().reload_current_scene()
@@ -635,8 +446,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		var k := event as InputEventKey
 		if k.pressed and not k.echo:
 			if k.keycode == KEY_M and sound != null:
-				var muted := sound.toggle_mute()
-				sound_button.text = "Sound: Off" if muted else "Sound: On"
+				if hud:
+					hud.set_sound_label(sound.toggle_mute())
 			elif k.keycode == KEY_F:
 				fog_enabled = not fog_enabled
 				_recompute_fog()
@@ -657,7 +468,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				drag_start_world = get_global_mouse_position()
 		elif mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed and dragging:
 			dragging = false
-			selection_rect.visible = false
+			if hud:
+				hud.selection_rect.visible = false
 			_finish_selection(get_global_mouse_position())
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
 			if placing_kind != "":
@@ -672,9 +484,12 @@ func _finish_selection(world_pos: Vector2) -> void:
 	var rect := Rect2(
 		Vector2(minf(drag_start_world.x, world_pos.x), minf(drag_start_world.y, world_pos.y)),
 		Vector2(absf(world_pos.x - drag_start_world.x), absf(world_pos.y - drag_start_world.y)))
+	# Selection is by my_faction, not the hardcoded PLAYER_FACTION:
+	# in client mode the player is the Orcs, and the old code never
+	# selected an Orc unit (see REVIEW.md, finding 2).
 	if rect.size.x > 12 and rect.size.y > 12:
 		for u in units:
-			if not u.dead and u.faction == PLAYER_FACTION and rect.has_point(u.position):
+			if not u.dead and u.faction == my_faction and rect.has_point(u.position):
 				_select_unit(u)
 	else:
 		# Single click: nearest friendly unit, else enemy unit, else building.
@@ -684,10 +499,10 @@ func _finish_selection(world_pos: Vector2) -> void:
 			if u.dead:
 				continue
 			var d := u.position.distance_to(world_pos)
-			if d < best_d and (best == null or u.faction == PLAYER_FACTION):
+			if d < best_d and (best == null or u.faction == my_faction):
 				best = u
 				best_d = d
-		if best != null and best.faction == PLAYER_FACTION:
+		if best != null and best.faction == my_faction:
 			_select_unit(best)
 		else:
 			var bb: RTSBuilding = null
@@ -774,43 +589,60 @@ func _issue_order(order: Dictionary) -> void:
 	_apply_order(order)
 
 
-func _apply_order(order: Dictionary) -> void:
+# Numbers arriving in an order may come from a network peer, so they
+# are read through _num: only real numbers are accepted, anything
+# else falls back to the default instead of erroring on a bad cast.
+static func _num(v: Variant, fallback: float) -> float:
+	if v is int or v is float:
+		return float(v)
+	return fallback
+
+
+# sender_faction is the faction of the peer that sent this order
+# ("" = local / trusted: no filtering). A remote order only ever
+# applies to the sender's own units and buildings — the old code
+# let any peer order either side's army (see REVIEW.md, finding 3).
+func _apply_order(order: Dictionary, sender_faction: String = "") -> void:
 	var ids: Array = order.get("unit_ids", [])
 	var i := 0
 	for id in ids:
+		if not (id is int or id is float):
+			continue
 		var u := _unit_by_id(int(id))
 		if u == null:
+			continue
+		if sender_faction != "" and u.faction != sender_faction:
 			continue
 		match String(order.get("type", "")):
 			"move":
 				var offset := Vector2((i % 3) * 36 - 36, (i / 3) * 36)
 				u.state = "move"
-				u.target_pos = Vector2(float(order.get("x", 0.0)), float(order.get("y", 0.0))) + offset
+				u.target_pos = Vector2(_num(order.get("x", 0.0), 0.0), _num(order.get("y", 0.0), 0.0)) + offset
 				u.target_unit = null
 				u.target_building = null
 				u.target_resource = null
 			"attack_unit":
 				u.state = "attack"
-				u.target_unit = _unit_by_id(int(order.get("target_id", -1)))
+				u.target_unit = _unit_by_id(int(_num(order.get("target_id", -1), -1.0)))
 				u.target_building = null
 				u.target_resource = null
 			"attack_building":
 				u.state = "attack"
 				u.target_unit = null
-				u.target_building = _building_by_id(int(order.get("target_id", -1)))
+				u.target_building = _building_by_id(int(_num(order.get("target_id", -1), -1.0)))
 				u.target_resource = null
 			"gather":
 				u.state = "gather_to"
-				u.target_resource = _resource_by_id(int(order.get("target_id", -1)))
+				u.target_resource = _resource_by_id(int(_num(order.get("target_id", -1), -1.0)))
 				u.target_unit = null
 				u.target_building = null
 			"rally":
 				pass
 		i += 1
 	if String(order.get("type", "")) == "rally":
-		var b := _building_by_id(int(order.get("building_id", -1)))
-		if b != null:
-			b.rally_pos = Vector2(float(order.get("x", 0.0)), float(order.get("y", 0.0)))
+		var b := _building_by_id(int(_num(order.get("building_id", -1), -1.0)))
+		if b != null and (sender_faction == "" or b.faction == sender_faction):
+			b.rally_pos = Vector2(_num(order.get("x", 0.0), 0.0), _num(order.get("y", 0.0), 0.0))
 
 
 func _try_place(world_pos: Vector2) -> void:
@@ -830,9 +662,16 @@ func _try_place(world_pos: Vector2) -> void:
 	_apply_place(kind, world_pos, worker.id)
 
 
-func _apply_place(kind: String, world_pos: Vector2, worker_id: int) -> void:
+func _apply_place(kind: String, world_pos: Vector2, worker_id: int, sender_faction: String = "") -> void:
 	var worker := _unit_by_id(worker_id)
 	if worker == null:
+		return
+	if sender_faction != "" and worker.faction != sender_faction:
+		return
+	# Only farms and barracks are placeable, and only known kinds:
+	# the old code accepted "town_hall" at cost 0 — a free hall.
+	if not RTSData.is_placeable(kind):
+		push_error("main._apply_place: kind '%s' is not placeable" % kind)
 		return
 	var faction := worker.faction
 	var cost: Dictionary = RTSData.building_cost(kind)
@@ -843,6 +682,8 @@ func _apply_place(kind: String, world_pos: Vector2, worker_id: int) -> void:
 	RTSData.pay(faction_res, cost)
 	var pos := world_pos.clamp(Vector2(80, 80), RTSData.WORLD_SIZE - Vector2(80, 80))
 	var b := _spawn_building(faction, kind, pos, true)
+	if b == null:
+		return
 	worker.state = "build"
 	worker.target_building = b
 	worker.target_pos = pos
@@ -862,11 +703,13 @@ func supply_used(faction: String) -> int:
 
 
 func supply_max(faction: String) -> int:
-	var total := 0
+	# Filter by faction, then delegate the sum to RTSData instead
+	# of duplicating it (see REVIEW.md, finding 15).
+	var mine: Array = []
 	for b in buildings:
 		if not b.dead and b.faction == faction and not b.under_construction:
-			total += int(RTSData.building_stats(b.kind).get("supply", 0))
-	return total
+			mine.append(b)
+	return RTSData.supply_max(mine)
 
 
 func _train_unit(kind: String) -> void:
@@ -878,11 +721,19 @@ func _train_unit(kind: String) -> void:
 	_apply_train(selected_building.id, kind)
 
 
-func _apply_train(building_id: int, kind: String) -> void:
+func _apply_train(building_id: int, kind: String, sender_faction: String = "") -> void:
 	var building := _building_by_id(building_id)
 	if building == null or building.under_construction:
 		return
-	if building.queue.size() >= 5:
+	if sender_faction != "" and building.faction != sender_faction:
+		return
+	# Only kinds this building can train (hall -> worker, barracks
+	# -> combat). The old code queued anything, including unknown
+	# kinds at cost 0, and a Grunt from a Town Hall.
+	if not RTSData.can_train_at(building.kind, kind):
+		push_error("main._apply_train: '%s' cannot train at a '%s'" % [kind, building.kind])
+		return
+	if building.queue.size() >= RTSData.MAX_TRAIN_QUEUE:
 		_set_message("Training queue is full.")
 		return
 	var faction := building.faction
@@ -907,16 +758,9 @@ func _apply_train(building_id: int, kind: String) -> void:
 
 
 func _nearest_enemy_unit(pos: Vector2, max_dist: float) -> RTSUnit:
-	var best: RTSUnit = null
-	var best_d := max_dist
-	for u in units:
-		if u.dead or u.faction == my_faction:
-			continue
-		var d := u.position.distance_to(pos)
-		if d < best_d:
-			best = u
-			best_d = d
-	return best
+	# One search, not two near-identical loops: this is the
+	# faction-specific search with my_faction filled in.
+	return _nearest_enemy_unit_for(my_faction, pos, max_dist)
 
 
 func _nearest_enemy_unit_for(faction: String, pos: Vector2, max_dist: float) -> RTSUnit:
@@ -977,7 +821,6 @@ func _nearest_hall(faction: String, pos: Vector2) -> RTSBuilding:
 
 func _process(delta: float) -> void:
 	if not started:
-		queue_redraw()
 		return
 	if game_over:
 		return
@@ -986,23 +829,29 @@ func _process(delta: float) -> void:
 	_update_drag_rect()
 	if game_mode == "client":
 		# Host-authoritative: the client only renders snapshots.
-		_update_hud()
+		if hud:
+			hud.update_hud()
 		_update_fog(delta)
-		queue_redraw()
 		return
 	_update_units(delta)
 	_update_buildings(delta)
 	if game_mode == "single" or game_mode == "campaign":
 		_update_ai(delta)
-	_update_hud()
+	if hud:
+		hud.update_hud()
 	_update_fog(delta)
 	_check_end()
 	if game_mode == "host" and remote_peer_id != 0:
 		snapshot_timer += delta
-		if snapshot_timer >= 0.15:
+		if snapshot_timer >= RTSData.SNAPSHOT_INTERVAL:
 			snapshot_timer = 0.0
 			_send_snapshot()
-	queue_redraw()
+	# No blanket queue_redraw(): _draw only paints static ground/grid
+	# plus the placement ghost. The ghost follows the mouse, so the
+	# map redraws only while placing; everything else redraws only
+	# when its own appearance changes (see RTSUnit / RTSFogLayer).
+	if placing_kind != "":
+		queue_redraw()
 
 
 func _fog_index(pos: Vector2) -> int:
@@ -1029,7 +878,7 @@ func _update_fog(delta: float) -> void:
 	fog_timer -= delta
 	if fog_timer > 0.0:
 		return
-	fog_timer = 0.25
+	fog_timer = RTSData.FOG_RECOMPUTE_INTERVAL
 	_recompute_fog()
 
 
@@ -1047,8 +896,12 @@ func _recompute_fog() -> void:
 	for b in buildings:
 		if b.dead or b.faction != my_faction:
 			continue
-		_mark_visible(b.position, 260.0)
+		_mark_visible(b.position, RTSData.BUILDING_SIGHT)
 	_apply_fog_visibility()
+	# The fog layer only redraws when the fog actually changed
+	# (see RTSFogLayer) — this is the moment that happens.
+	if fog_layer:
+		fog_layer.queue_redraw()
 
 
 func _mark_visible(pos: Vector2, radius: float) -> void:
@@ -1084,39 +937,50 @@ func _apply_fog_visibility() -> void:
 
 func _update_camera(delta: float) -> void:
 	var dir := Vector2.ZERO
-	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
-		dir.y -= 1
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
-		dir.y += 1
-	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-		dir.x -= 1
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-		dir.x += 1
+	# WASD panning is skipped while a text field has focus: typing
+	# an IP address into the join field used to pan the camera at
+	# the same time (see REVIEW.md, finding 6).
+	var focus_owner := get_viewport().gui_get_focus_owner()
+	var typing := focus_owner is LineEdit
+	if not typing:
+		if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+			dir.y -= 1
+		if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+			dir.y += 1
+		if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+			dir.x -= 1
+		if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+			dir.x += 1
 	if dir == Vector2.ZERO and not dragging:
 		var mp := get_viewport().get_mouse_position()
 		var vp := get_viewport_rect().size
-		if mp.x < 12:
-			dir.x -= 1
-		elif mp.x > vp.x - 12:
-			dir.x += 1
-		if mp.y < 48:
-			dir.y -= 1
-		elif mp.y > vp.y - 132:
-			dir.y += 1
+		# No edge-pan while the mouse is over the bottom command
+		# panel: the old threshold (vp.y - 132) overlapped the
+		# panel, so clicking a command button panned the camera.
+		var over_bottom_panel := mp.y > vp.y - BOTTOM_PANEL_HEIGHT
+		if not over_bottom_panel:
+			if mp.x < EDGE_MARGIN:
+				dir.x -= 1
+			elif mp.x > vp.x - EDGE_MARGIN:
+				dir.x += 1
+			if mp.y < TOP_BAR_HEIGHT + EDGE_MARGIN:
+				dir.y -= 1
+			elif mp.y > vp.y - BOTTOM_PANEL_HEIGHT - EDGE_MARGIN:
+				dir.y += 1
 	if dir != Vector2.ZERO:
-		camera.position += dir.normalized() * 550.0 * delta
+		camera.position += dir.normalized() * CAMERA_SPEED * delta
 		camera.position = camera.position.clamp(Vector2.ZERO, RTSData.WORLD_SIZE)
 
 
 func _update_drag_rect() -> void:
-	if dragging:
+	if dragging and hud:
 		var mp := get_viewport().get_mouse_position()
 		var rect := Rect2(
 			Vector2(minf(drag_start_screen.x, mp.x), minf(drag_start_screen.y, mp.y)),
 			Vector2(absf(mp.x - drag_start_screen.x), absf(mp.y - drag_start_screen.y)))
-		selection_rect.visible = true
-		selection_rect.position = rect.position
-		selection_rect.size = rect.size
+		hud.selection_rect.visible = true
+		hud.selection_rect.position = rect.position
+		hud.selection_rect.size = rect.size
 
 
 func _move_toward(u: RTSUnit, dest: Vector2, delta: float, stop_dist: float) -> bool:
@@ -1133,14 +997,17 @@ func _move_toward(u: RTSUnit, dest: Vector2, delta: float, stop_dist: float) -> 
 	return false
 
 
+# O(n²) per frame (called once per unit, loops all units) — fine
+# at ~40 units, the scaling ceiling past ~150. A spatial hash is
+# the fix if the unit cap ever grows; see REVIEW.md, finding 9.
 func _separate(u: RTSUnit) -> void:
 	for other in units:
 		if other == u or other.dead:
 			continue
 		var d := u.position - other.position
 		var dist := d.length()
-		if dist > 0.01 and dist < 24.0:
-			u.position += d.normalized() * (24.0 - dist) * 0.5
+		if dist > 0.01 and dist < RTSData.SEPARATION_DIST:
+			u.position += d.normalized() * (RTSData.SEPARATION_DIST - dist) * 0.5
 
 
 func _update_units(delta: float) -> void:
@@ -1156,24 +1023,28 @@ func _update_units(delta: float) -> void:
 						u.state = "attack"
 						u.target_unit = foe
 			"move":
-				if _move_toward(u, u.target_pos, delta, 6.0):
+				if _move_toward(u, u.target_pos, delta, RTSData.MOVE_STOP_DIST):
 					u.state = "idle"
 			"attack_move":
 				var foe2 := _nearest_enemy_unit_for(u.faction, u.position, u.sight)
 				if foe2 != null:
 					u.state = "attack"
 					u.target_unit = foe2
-				elif _move_toward(u, u.target_pos, delta, 6.0):
+				elif _move_toward(u, u.target_pos, delta, RTSData.MOVE_STOP_DIST):
 					u.state = "idle"
 			"gather_to":
-				if u.target_resource == null or u.target_resource.dead or u.target_resource.amount <= 0:
+				# is_instance_valid first: the target may have been
+				# freed since it was assigned (see _remove_resource
+				# and REVIEW.md, finding 1). Reading .dead on a
+				# freed instance is an error, not a null.
+				if not is_instance_valid(u.target_resource) or u.target_resource.dead or u.target_resource.amount <= 0:
 					u.state = "idle"
 					u.target_resource = null
-				elif _move_toward(u, u.target_resource.position, delta, 34.0):
+				elif _move_toward(u, u.target_resource.position, delta, RTSData.GATHER_STOP_DIST):
 					u.state = "gathering"
 					u.gather_timer = RTSData.GATHER_TIME
 			"gathering":
-				if u.target_resource == null or u.target_resource.dead:
+				if not is_instance_valid(u.target_resource) or u.target_resource.dead:
 					u.state = "idle"
 				else:
 					u.gather_timer -= delta
@@ -1186,12 +1057,12 @@ func _update_units(delta: float) -> void:
 						u.state = "return"
 						var hall := _nearest_hall(u.faction, u.position)
 						if hall != null:
-							u.target_pos = hall.position + Vector2(0, 70)
+							u.target_pos = hall.position + RTSData.HALL_DROPOFF_OFFSET
 			"return":
 				var hall2 := _nearest_hall(u.faction, u.position)
 				if hall2 == null:
 					u.state = "idle"
-				elif _move_toward(u, hall2.position + Vector2(0, 70), delta, 50.0):
+				elif _move_toward(u, hall2.position + RTSData.HALL_DROPOFF_OFFSET, delta, RTSData.RETURN_STOP_DIST):
 					var r: Dictionary = res[u.faction]
 					if u.carry_type == "gold":
 						r["gold"] = int(r["gold"]) + u.carry_amount
@@ -1201,19 +1072,19 @@ func _update_units(delta: float) -> void:
 						sound.play("coin")
 					u.carry_amount = 0
 					u.carry_type = ""
-					if u.target_resource != null and not u.target_resource.dead and u.target_resource.amount > 0:
+					if is_instance_valid(u.target_resource) and not u.target_resource.dead and u.target_resource.amount > 0:
 						u.state = "gather_to"
 					else:
 						u.state = "idle"
 						u.target_resource = null
 			"build":
-				if u.target_building == null or u.target_building.dead or not u.target_building.under_construction:
+				if not is_instance_valid(u.target_building) or u.target_building.dead or not u.target_building.under_construction:
 					u.state = "idle"
 					u.target_building = null
-				elif _move_toward(u, u.target_building.position, delta, 70.0):
+				elif _move_toward(u, u.target_building.position, delta, RTSData.BUILD_STOP_DIST):
 					u.state = "building"
 			"building":
-				if u.target_building == null or u.target_building.dead or not u.target_building.under_construction:
+				if not is_instance_valid(u.target_building) or u.target_building.dead or not u.target_building.under_construction:
 					u.state = "idle"
 					u.target_building = null
 			"attack":
@@ -1224,20 +1095,25 @@ func _update_units(delta: float) -> void:
 func _update_attack(u: RTSUnit, delta: float) -> void:
 	var target_pos := Vector2.INF
 	var target_is_unit := false
-	if u.target_unit != null:
+	# is_instance_valid first — see the gather_to branch above:
+	# a target freed last frame is not null, it is a dangling
+	# reference, and reading .dead on it is an error.
+	if is_instance_valid(u.target_unit):
 		if u.target_unit.dead:
 			u.target_unit = null
 			u.state = "idle"
 			return
 		target_pos = u.target_unit.position
 		target_is_unit = true
-	elif u.target_building != null:
+	elif is_instance_valid(u.target_building):
 		if u.target_building.dead:
 			u.target_building = null
 			u.state = "idle"
 			return
 		target_pos = u.target_building.position
 	else:
+		u.target_unit = null
+		u.target_building = null
 		u.state = "idle"
 		return
 	var dist := u.position.distance_to(target_pos)
@@ -1253,15 +1129,68 @@ func _update_attack(u: RTSUnit, delta: float) -> void:
 			_damage_building(u.target_building, u.damage)
 
 
+# One removal path per entity type. Everything that kills or
+# despawns an entity goes through here, because removal has a
+# second job besides erasing and freeing: every other unit that
+# was targeting the victim must forget it. The old code did that
+# for buildings only; a dead unit left attackers holding a
+# reference to a freed instance, which errored the next frame
+# and stalled their state machine (see REVIEW.md, finding 1).
+func _clear_targets_of_unit(victim: RTSUnit) -> void:
+	for u in units:
+		if u.target_unit == victim:
+			u.target_unit = null
+			if u.state == "attack":
+				u.state = "idle"
+
+
+func _clear_targets_of_building(victim: RTSBuilding) -> void:
+	for u in units:
+		if u.target_building == victim:
+			u.target_building = null
+			if u.state == "attack" or u.state == "build" or u.state == "building":
+				u.state = "idle"
+
+
+func _clear_targets_of_resource(victim: RTSResource) -> void:
+	for u in units:
+		if u.target_resource == victim:
+			u.target_resource = null
+			if u.state == "gather_to" or u.state == "gathering" or u.state == "return":
+				u.state = "idle"
+
+
+func _remove_unit(u: RTSUnit) -> void:
+	_clear_targets_of_unit(u)
+	units.erase(u)
+	selected_units.erase(u)
+	u.dead = true
+	u.queue_free()
+
+
+func _remove_building(b: RTSBuilding) -> void:
+	_clear_targets_of_building(b)
+	buildings.erase(b)
+	if selected_building == b:
+		selected_building = null
+		_refresh_command_panel()
+	b.dead = true
+	b.queue_free()
+
+
+func _remove_resource(r: RTSResource) -> void:
+	_clear_targets_of_resource(r)
+	resource_nodes.erase(r)
+	r.dead = true
+	r.queue_free()
+
+
 func _damage_unit(u: RTSUnit, amount: int) -> void:
 	if u.dead:
 		return
 	u.hp -= amount
 	if u.hp <= 0:
-		u.dead = true
-		units.erase(u)
-		selected_units.erase(u)
-		u.queue_free()
+		_remove_unit(u)
 
 
 func _damage_building(b: RTSBuilding, amount: int) -> void:
@@ -1269,23 +1198,8 @@ func _damage_building(b: RTSBuilding, amount: int) -> void:
 		return
 	b.hp -= amount
 	if b.hp <= 0:
-		b.dead = true
-		buildings.erase(b)
-		if selected_building == b:
-			selected_building = null
-			_refresh_command_panel()
-		for u in units:
-			if u.target_building == b:
-				u.target_building = null
-				u.state = "idle"
-		b.queue_free()
+		_remove_building(b)
 		_set_message("A %s has fallen!" % String(RTSData.building_stats(b.kind).get("name", "building")))
-
-
-func _remove_resource(r: RTSResource) -> void:
-	r.dead = true
-	resource_nodes.erase(r)
-	r.queue_free()
 
 
 func _update_buildings(delta: float) -> void:
@@ -1296,7 +1210,7 @@ func _update_buildings(delta: float) -> void:
 			var rate := 1.0
 			for u in units:
 				if not u.dead and u.state == "building" and u.target_building == b:
-					rate = 2.5
+					rate = RTSData.BUILD_RATE_WITH_WORKER
 			b.build_progress += delta * rate
 			if b.build_progress >= b.build_time:
 				b.under_construction = false
@@ -1311,28 +1225,19 @@ func _update_buildings(delta: float) -> void:
 		if b.queue_timer <= 0.0:
 			var kind := String(b.queue[0])
 			b.queue.remove_at(0)
-			var spawn_pos: Vector2 = b.position + Vector2(85, 0)
+			var spawn_pos: Vector2 = b.position + RTSData.TRAIN_SPAWN_OFFSET
 			var u := _spawn_unit(b.faction, kind, spawn_pos)
+			if u == null:
+				# Unknown kind in the queue (rejected at train
+				# time since v0.3.0, but never assume the queue
+				# is clean): drop it instead of crashing.
+				continue
 			u.state = "move"
 			u.target_pos = b.rally_pos
 			if b.faction == my_faction and sound:
 				sound.play("train")
 			if not b.queue.is_empty():
 				b.queue_timer = float(RTSData.unit_stats(String(b.queue[0])).get("train_time", 10.0))
-
-
-func _update_hud() -> void:
-	var my_res: Dictionary = res[my_faction]
-	gold_label.text = "Gold: %d" % int(my_res.get("gold", 0))
-	wood_label.text = "Wood: %d" % int(my_res.get("wood", 0))
-	supply_label.text = "Supply: %d/%d" % [supply_used(my_faction), supply_max(my_faction)]
-	var mins := int(elapsed) / 60
-	var secs := int(elapsed) % 60
-	time_label.text = "%d:%02d" % [mins, secs]
-	if selected_building != null and not selected_building.dead:
-		selection_label.text = "%s — HP %d/%d  (queue: %d)" % [
-			String(RTSData.building_stats(selected_building.kind).get("name", "?")),
-			selected_building.hp, selected_building.max_hp, selected_building.queue.size()]
 
 
 func _check_end() -> void:
@@ -1369,30 +1274,38 @@ func _end_game(winner: String) -> void:
 	game_over = true
 	winner_faction = winner
 	victory = winner == my_faction
-	if victory:
-		end_label.text = "Victory! The Orc base has fallen."
-		if sound:
-			sound.play("victory")
-	else:
-		end_label.text = "Defeat — your base has fallen."
-		if sound:
-			sound.play("defeat")
-	end_panel.visible = true
+	# The old text always said "The Orc base has fallen" — wrong
+	# when the winner is the Orcs and you are the Orcs.
+	if sound:
+		sound.play("victory" if victory else "defeat")
+	var show_next := false
 	if game_mode == "campaign" and victory and mission_index >= 0:
 		campaign_unlocked = maxi(campaign_unlocked, mission_index + 2)
 		RTSCampaign.save_unlocked(campaign_unlocked)
-		if mission_index + 1 < RTSCampaign.missions().size():
-			next_mission_button.visible = true
+		show_next = mission_index + 1 < RTSCampaign.missions().size()
+	if hud:
+		hud.show_end(victory, show_next)
 	if game_mode == "host" and remote_peer_id != 0:
 		_send_snapshot()
 
 
 # ---------------------------------------------------------------- Orc AI
 
+# The AI's home base, derived from its Great Hall — not a
+# hardcoded map coordinate (see REVIEW.md, finding 13). Farm and
+# barracks spots are offsets from it, so moving the base on the
+# map moves the AI's build plan with it.
+func _ai_base_pos() -> Vector2:
+	var hall := _nearest_hall(AI_FACTION, Vector2.ZERO)
+	if hall != null:
+		return hall.position
+	return Vector2(2080, 350)
+
+
 func _update_ai(delta: float) -> void:
 	ai_timer += delta
 	ai_attack_timer -= delta
-	if ai_timer < 5.0:
+	if ai_timer < RTSData.AI_TICK:
 		return
 	ai_timer = 0.0
 	_ai_assign_workers()
@@ -1407,16 +1320,17 @@ func _ai_assign_workers() -> void:
 	for u in units:
 		if not u.dead and u.faction == AI_FACTION and RTSData.is_worker(u.kind):
 			peons.append(u)
+	var base := _ai_base_pos()
 	var gold_mine: RTSResource = null
 	var tree: RTSResource = null
 	var tree_d := 1e9
 	for r in resource_nodes:
 		if r.dead:
 			continue
-		if r.kind == "gold" and gold_mine == null and r.position.distance_to(Vector2(2080, 350)) < 600:
+		if r.kind == "gold" and gold_mine == null and r.position.distance_to(base) < 600:
 			gold_mine = r
 		if r.kind == "tree":
-			var td := r.position.distance_to(Vector2(2080, 350))
+			var td := r.position.distance_to(base)
 			if td < tree_d:
 				tree = r
 				tree_d = td
@@ -1433,14 +1347,17 @@ func _ai_assign_workers() -> void:
 
 func _ai_build_and_train() -> void:
 	var ai_res: Dictionary = res[AI_FACTION]
-	# Stage 0: pig farm once we can afford it.
+	# Stage 0: pig farm once we can afford it. Spots are offsets
+	# from the hall, so they match the old fixed coordinates
+	# (farm 1920,480 / barracks 2080,500) on the current map.
+	var base := _ai_base_pos()
 	if ai_stage == 0:
-		if _ai_try_build("pig_farm", Vector2(1920, 480)):
+		if _ai_try_build("pig_farm", base + Vector2(-160, 130)):
 			ai_stage = 1
 		return
 	# Stage 1: barracks.
 	if ai_stage == 1:
-		if _ai_try_build("barracks", Vector2(2080, 500)):
+		if _ai_try_build("barracks", base + Vector2(0, 150)):
 			ai_stage = 2
 		return
 	# Stage 2+: keep training.
@@ -1497,6 +1414,8 @@ func _ai_try_build(kind: String, pos: Vector2) -> bool:
 func _ai_attack_wave() -> void:
 	var hall := _nearest_hall(PLAYER_FACTION, Vector2(1200, 800))
 	var dest := Vector2(320, 1250) if hall == null else hall.position
+	# (The fallback is the Human Town Hall's map position; the
+	# hall lookup above finds it on the current map.)
 	var sent := 0
 	for u in units:
 		if u.dead or u.faction != AI_FACTION or RTSData.is_worker(u.kind):
@@ -1512,22 +1431,30 @@ func _ai_attack_wave() -> void:
 
 # ---------------------------------------------------------------- Multiplayer
 
+# The sender's faction is derived from the peer id, not trusted
+# from the message: the server is always the Humans (id 1), the
+# joining player is always the Orcs. _apply_* then only lets the
+# sender touch their own side (see REVIEW.md, finding 3).
+func _sender_faction() -> String:
+	return PLAYER_FACTION if multiplayer.get_remote_sender_id() == 1 else AI_FACTION
+
+
 @rpc("any_peer", "call_remote", "reliable")
 func _rpc_order(order: Dictionary) -> void:
 	if multiplayer.is_server():
-		_apply_order(order)
+		_apply_order(order, _sender_faction())
 
 
 @rpc("any_peer", "call_remote", "reliable")
 func _rpc_train(building_id: int, kind: String) -> void:
 	if multiplayer.is_server():
-		_apply_train(building_id, kind)
+		_apply_train(building_id, kind, _sender_faction())
 
 
 @rpc("any_peer", "call_remote", "reliable")
 func _rpc_place(kind: String, x: float, y: float, worker_id: int) -> void:
 	if multiplayer.is_server():
-		_apply_place(kind, Vector2(x, y), worker_id)
+		_apply_place(kind, Vector2(x, y), worker_id, _sender_faction())
 
 
 @rpc("any_peer", "call_remote", "unreliable")
@@ -1577,61 +1504,99 @@ func _send_snapshot() -> void:
 	rpc("_rpc_snapshot", _build_snapshot())
 
 
+# Snapshot entries come from the network, so every entry is
+# validated before it touches the game: non-Dictionary entries
+# are skipped, unknown kinds/factions are skipped, and numbers
+# are clamped to sane ranges. The old code did
+# `var d: Dictionary = su` (errors on a non-Dictionary) and
+# replaced `res` wholesale with whatever the peer sent.
+# Removal goes through _remove_* so dangling target references
+# are cleared (see REVIEW.md, findings 1 and 5).
 func _apply_snapshot(data: Dictionary) -> void:
-	res = data.get("res", res)
-	elapsed = float(data.get("elapsed", elapsed))
+	var new_res: Variant = data.get("res", null)
+	if new_res is Dictionary and (new_res as Dictionary).get("human") is Dictionary and (new_res as Dictionary).get("orc") is Dictionary:
+		res = new_res
+	elapsed = _num(data.get("elapsed", elapsed), elapsed)
 	var seen_units: Dictionary = {}
 	for su in data.get("units", []):
+		if not (su is Dictionary):
+			continue
 		var d: Dictionary = su
-		var id := int(d.get("id", -1))
+		var id := int(_num(d.get("id", -1), -1.0))
+		if id < 0:
+			continue
+		var faction := String(d.get("faction", "human"))
+		var kind := String(d.get("kind", "peasant"))
+		if faction != PLAYER_FACTION and faction != AI_FACTION:
+			continue
+		if not RTSData.is_known_unit(kind):
+			continue
 		seen_units[id] = true
 		var u := _unit_by_id(id)
 		if u == null:
-			u = _spawn_unit(String(d.get("faction", "human")), String(d.get("kind", "peasant")), Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0))), id)
-		u.position = Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
-		u.hp = int(d.get("hp", u.max_hp))
+			u = _spawn_unit(faction, kind, Vector2(_num(d.get("x", 0.0), 0.0), _num(d.get("y", 0.0), 0.0)), id)
+			if u == null:
+				continue
+		u.position = Vector2(_num(d.get("x", 0.0), 0.0), _num(d.get("y", 0.0), 0.0))
+		u.hp = clampi(int(_num(d.get("hp", u.max_hp), float(u.max_hp))), 0, u.max_hp)
 		u.state = String(d.get("state", "idle"))
 		u.carry_type = String(d.get("carry_type", ""))
-		u.carry_amount = int(d.get("carry_amount", 0))
+		u.carry_amount = maxi(0, int(_num(d.get("carry_amount", 0), 0.0)))
 	for u in units.duplicate():
 		if not seen_units.has(u.id):
-			units.erase(u)
-			selected_units.erase(u)
-			u.queue_free()
+			_remove_unit(u)
 	var seen_buildings: Dictionary = {}
 	for sb in data.get("buildings", []):
+		if not (sb is Dictionary):
+			continue
 		var d: Dictionary = sb
-		var id := int(d.get("id", -1))
+		var id := int(_num(d.get("id", -1), -1.0))
+		if id < 0:
+			continue
+		var faction := String(d.get("faction", "human"))
+		var kind := String(d.get("kind", "farm"))
+		if faction != PLAYER_FACTION and faction != AI_FACTION:
+			continue
+		if not RTSData.is_known_building(kind):
+			continue
 		seen_buildings[id] = true
 		var b := _building_by_id(id)
 		if b == null:
-			b = _spawn_building(String(d.get("faction", "human")), String(d.get("kind", "farm")), Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0))), bool(d.get("under_construction", false)), id)
-		b.position = Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
-		b.hp = int(d.get("hp", b.max_hp))
+			b = _spawn_building(faction, kind, Vector2(_num(d.get("x", 0.0), 0.0), _num(d.get("y", 0.0), 0.0)), bool(d.get("under_construction", false)), id)
+			if b == null:
+				continue
+		b.position = Vector2(_num(d.get("x", 0.0), 0.0), _num(d.get("y", 0.0), 0.0))
+		b.hp = clampi(int(_num(d.get("hp", b.max_hp), float(b.max_hp))), 0, b.max_hp)
 		b.under_construction = bool(d.get("under_construction", false))
-		b.build_progress = float(d.get("build_progress", 0.0))
-		b.queue = Array(d.get("queue", []))
-		b.queue_timer = float(d.get("queue_timer", 0.0))
-		b.rally_pos = Vector2(float(d.get("rally_x", 0.0)), float(d.get("rally_y", 0.0)))
+		b.build_progress = maxf(0.0, _num(d.get("build_progress", 0.0), 0.0))
+		var q: Variant = d.get("queue", [])
+		b.queue = Array(q) if q is Array else []
+		b.queue_timer = maxf(0.0, _num(d.get("queue_timer", 0.0), 0.0))
+		b.rally_pos = Vector2(_num(d.get("rally_x", 0.0), 0.0), _num(d.get("rally_y", 0.0), 0.0))
 	for b in buildings.duplicate():
 		if not seen_buildings.has(b.id):
-			buildings.erase(b)
-			if selected_building == b:
-				selected_building = null
-			b.queue_free()
+			_remove_building(b)
 	var seen_resources: Dictionary = {}
 	for sr in data.get("resources", []):
+		if not (sr is Dictionary):
+			continue
 		var d: Dictionary = sr
-		var id := int(d.get("id", -1))
+		var id := int(_num(d.get("id", -1), -1.0))
+		if id < 0:
+			continue
+		var kind := String(d.get("kind", "gold"))
+		if kind != "gold" and kind != "tree":
+			continue
 		seen_resources[id] = true
 		var r := _resource_by_id(id)
 		if r == null:
-			r = _spawn_resource(String(d.get("kind", "gold")), Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0))), int(d.get("amount", 0)), id)
-		r.amount = int(d.get("amount", 0))
+			r = _spawn_resource(kind, Vector2(_num(d.get("x", 0.0), 0.0), _num(d.get("y", 0.0), 0.0)), maxi(0, int(_num(d.get("amount", 0), 0.0))), id)
+			if r == null:
+				continue
+		r.amount = maxi(0, int(_num(d.get("amount", 0), 0.0)))
 	for r in resource_nodes.duplicate():
 		if not seen_resources.has(r.id):
-			resource_nodes.erase(r)
-			r.queue_free()
+			_remove_resource(r)
 	_recompute_fog()
 	if not _snapshot_logged:
 		_snapshot_logged = true

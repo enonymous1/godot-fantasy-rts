@@ -16,6 +16,23 @@ const GOLD_CARRY := 10
 const WOOD_CARRY := 10
 const GATHER_TIME := 1.0
 
+# Simulation tuning. Keep every magic number here (or in main.gd's
+# camera/UI constants) so balancing is a one-line change, not a
+# hunt through the simulation code.
+const BUILDING_SIGHT := 260.0
+const SEPARATION_DIST := 24.0
+const MOVE_STOP_DIST := 6.0
+const GATHER_STOP_DIST := 34.0
+const RETURN_STOP_DIST := 50.0
+const BUILD_STOP_DIST := 70.0
+const BUILD_RATE_WITH_WORKER := 2.5
+const TRAIN_SPAWN_OFFSET := Vector2(85, 0)
+const HALL_DROPOFF_OFFSET := Vector2(0, 70)
+const MAX_TRAIN_QUEUE := 5
+const SNAPSHOT_INTERVAL := 0.15
+const AI_TICK := 5.0
+const FOG_RECOMPUTE_INTERVAL := 0.25
+
 
 static func unit_stats(kind: String) -> Dictionary:
 	match kind:
@@ -107,7 +124,16 @@ static func starting_resources() -> Dictionary:
 static func supply_max(buildings: Array) -> int:
 	var total := 0
 	for b in buildings:
-		total += int(RTSData.building_stats(String(b.get("kind", ""))).get("supply", 0))
+		# Buildings arrive as RTSBuilding nodes from the game and
+		# as plain Dictionaries from the data tests. Node2D.get()
+		# takes one argument (no default), so read the kind by
+		# type instead of calling .get("kind", "") on both.
+		var kind := ""
+		if b is RTSBuilding:
+			kind = (b as RTSBuilding).kind
+		elif b is Dictionary:
+			kind = String((b as Dictionary).get("kind", ""))
+		total += int(RTSData.building_stats(kind).get("supply", 0))
 	return total
 
 
@@ -117,3 +143,30 @@ static func is_worker(kind: String) -> bool:
 
 static func is_ranged(kind: String) -> bool:
 	return kind == "archer" or kind == "spearman"
+
+
+static func is_known_unit(kind: String) -> bool:
+	return not unit_stats(kind).is_empty()
+
+
+static func is_known_building(kind: String) -> bool:
+	return not building_stats(kind).is_empty()
+
+
+# What a building can train: halls train workers, barracks train
+# combat units. Used by the host to validate train orders, so a
+# client cannot queue a Grunt from a Town Hall (or a bogus kind).
+static func can_train_at(building_kind: String, unit_kind: String) -> bool:
+	if not is_known_unit(unit_kind):
+		return false
+	if building_kind == "town_hall" or building_kind == "great_hall":
+		return is_worker(unit_kind)
+	if building_kind == "barracks":
+		return not is_worker(unit_kind)
+	return false
+
+
+# Only farms and barracks are placeable by a worker. Halls are
+# map fixtures: letting an order spawn one would be a free building.
+static func is_placeable(kind: String) -> bool:
+	return kind == "farm" or kind == "pig_farm" or kind == "barracks"

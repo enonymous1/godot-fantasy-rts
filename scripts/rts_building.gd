@@ -18,17 +18,23 @@ var selected: bool = false
 var dead: bool = false
 
 
-func setup(p_faction: String, p_kind: String, pos: Vector2, p_under_construction: bool = false) -> void:
+# Returns false for an unknown kind instead of silently building a
+# default-stat building (see RTSUnit.setup for the same rule).
+func setup(p_faction: String, p_kind: String, pos: Vector2, p_under_construction: bool = false) -> bool:
+	var st := RTSData.building_stats(p_kind)
+	if st.is_empty():
+		push_error("RTSBuilding.setup: unknown building kind '%s'" % p_kind)
+		return false
 	faction = p_faction
 	kind = p_kind
 	position = pos
 	rally_pos = pos + Vector2(90, 0)
-	var st := RTSData.building_stats(kind)
 	max_hp = int(st.get("hp", 400))
 	hp = max_hp if not p_under_construction else 100
 	build_time = float(st.get("build_time", 20.0))
 	under_construction = p_under_construction
 	build_progress = 0.0 if p_under_construction else build_time
+	return true
 
 
 func faction_color() -> Color:
@@ -46,8 +52,21 @@ func size_px() -> Vector2:
 	return Vector2(70, 60)
 
 
+# Same rule as RTSUnit: redraw only when the appearance changes.
+# Construction progress and the training timer move every frame, so
+# they are quantized (5% / 0.1 s) — the bars still animate, but the
+# canvas item is rebuilt ~10 times a second instead of 60.
+var _draw_key := ""
+
+
 func _process(_delta: float) -> void:
-	queue_redraw()
+	var key := "%d|%s|%s|%d|%d|%d" % [
+		hp, str(selected), str(under_construction),
+		int(build_progress / maxf(build_time, 0.01) * 20.0),
+		queue.size(), int(queue_timer * 10.0)]
+	if key != _draw_key:
+		_draw_key = key
+		queue_redraw()
 
 
 func _draw() -> void:

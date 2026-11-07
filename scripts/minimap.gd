@@ -8,8 +8,17 @@ extends Control
 var game: Node2D = null
 
 
-func _process(_delta: float) -> void:
-	queue_redraw()
+# 10 Hz is plenty for a 200x133 overview: units move a few pixels
+# per tick at this scale, and the old per-frame redraw rebuilt the
+# whole minimap 60 times a second.
+var _redraw_timer := 0.0
+
+
+func _process(delta: float) -> void:
+	_redraw_timer -= delta
+	if _redraw_timer <= 0.0:
+		_redraw_timer = 0.1
+		queue_redraw()
 
 
 func _gui_input(event: InputEvent) -> void:

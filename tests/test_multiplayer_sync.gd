@@ -55,7 +55,7 @@ func _run_all() -> void:
 	_client.game_mode = "client"
 	_client.my_faction = "orc"
 	_client.started = true
-	_client.menu_panel.visible = false
+	_client.hud.menu_panel.visible = false
 	# Entity ids are unique and stable across the deterministic map.
 	var host_ids: Dictionary = {}
 	for u in _host.units:

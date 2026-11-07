@@ -1,0 +1,45 @@
+%% Architecture — Fantasy RTS (Godot 4.7.2). Render with any
+%% Mermaid viewer (GitHub renders .mmd in the browser).
+%% main.gd is the composition root: it builds the world and wires
+%% the subsystems together, but the rules live in the leaf nodes.
+flowchart TB
+    subgraph Scene["scenes/main.tscn — Node2D + main.gd"]
+        MAIN["main.gd — game controller\n(composition root)\nmap · economy · sim · AI\nfog · camera · input · MP"]
+    end
+
+    MAIN --> HUD["hud.gd — RTSHud (CanvasLayer)\ntop bar · message · bottom panel\ncommand buttons · end panel\nstart menu (single / campaign /\nhost / join / WebSocket)"]
+    MAIN --> FOG["fog_layer.gd — RTSFogLayer\n~1,650-cell overlay\nredraws only on recompute"]
+    MAIN --> MINI["minimap.gd — RTSMinimap\nclick/drag camera, 10 Hz"]
+    MAIN --> SND["sound_manager.gd\nsynthesized AudioStreamWAV\n22050 Hz, 16-bit, no files"]
+    MAIN --> DATA["rts_data.gd — RTSData\npure data: costs / stats /\ntuning consts (no nodes)"]
+    MAIN --> CAMP["campaign_data.gd\n3 missions + progress save\nuser://campaign_progress.cfg"]
+    MAIN --> UNIT["rts_unit.gd — RTSUnit\nvisual + state; redraws\nonly on appearance change"]
+    MAIN --> BLDG["rts_building.gd — RTSBuilding\nvisual + state; training\nqueue + construction"]
+    MAIN --> RES["rts_resource.gd — RTSResource\ngold mine / tree; draws once"]
+
+    DATA -.-> UNIT
+    DATA -.-> BLDG
+    DATA -.-> RES
+    CAMP -.-> MAIN
+
+    subgraph MP["Multiplayer — host-authoritative, port 7777"]
+        HOST["Host (Humans)\nsimulates · sends snapshots ~7 Hz"]
+        CLIENT["Joiner (Orcs)\nsends orders via RPC\ngets snapshots"]
+        HOST -- "snapshot (unreliable RPC)" --> CLIENT
+        CLIENT -- "order / train / place (reliable RPC)\nvalidated: sender's faction only" --> HOST
+    end
+
+    MAIN --- HOST
+    MAIN --- CLIENT
+
+    subgraph Tests["tests/ — headless, no rendering"]
+        T1["test_rts_data · test_scene_smoke"]
+        T2["test_simulation · test_fog_sound"]
+        T3["test_multiplayer_sync · test_campaign"]
+        T4["test_combat_cleanup · test_review_fixes"]
+    end
+
+    MAIN -.-> T1
+    MAIN -.-> T2
+    MAIN -.-> T3
+    MAIN -.-> T4

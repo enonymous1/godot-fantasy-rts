@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Godot 4.7.2
+        # The org is chickensoft-games, not chickensoft-godot —
+        # the wrong org failed the first CI run on the sibling
+        # godot-dungeon-looter repo.
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.2
+          use-dotnet: false
+          include-templates: false
+      - name: Import project (headless)
+        run: godot --headless --path . --import
+      - name: Run data tests (headless)
+        run: godot --headless --path . -s res://tests/test_rts_data.gd
+      - name: Run scene smoke test (headless)
+        run: godot --headless --path . -s res://tests/test_scene_smoke.gd
+      - name: Run simulation test (headless)
+        run: godot --headless --path . -s res://tests/test_simulation.gd
+      - name: Run fog/sound tests (headless)
+        run: godot --headless --path . -s res://tests/test_fog_sound.gd
+      - name: Run multiplayer sync tests (headless)
+        run: godot --headless --path . -s res://tests/test_multiplayer_sync.gd
+      - name: Run campaign tests (headless)
+        run: godot --headless --path . -s res://tests/test_campaign.gd
+      - name: Run combat cleanup tests (headless)
+        run: godot --headless --path . -s res://tests/test_combat_cleanup.gd
+      - name: Run review-fixes tests (headless)
+        run: godot --headless --path . -s res://tests/test_review_fixes.gd
+      # Exports are NOT run here: export templates are not installed
+      # in CI (1.28 GB). A Windows Desktop / Web export needs the
+      # templates from the Godot 4.7.2 release first — see README.
